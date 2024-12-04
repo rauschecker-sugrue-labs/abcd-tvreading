@@ -1,0 +1,483 @@
+---
+title: "TV/Reading"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(ggplot2)
+library(tidyr)
+
+# Create figure directory at ../../figures
+figures_dir <- file.path("..", "..", "figures")
+if (!dir.exists(figures_dir)) {
+    dir.create(figures_dir, recursive = TRUE)
+}
+
+```
+
+# Loading data from nda3.0.Rds file & plink2.eigenvec file
+
+```{r}
+file_path <- file.path("..", "..", "data", "plink2.eigenvec")
+genomic_data <- read.table(file_path, header = TRUE)
+cat("Number of lines in the file: ", nrow(genomic_data), "\n")
+```
+
+
+```{r}
+file_path <- file.path("..", "..", "data", "nda3.0.Rds")
+data <- readRDS(file_path)
+# Filter for baseline data only
+data <- dplyr::filter(data, eventname == "baseline_year_1_arm_1")
+cat("Number of lines after filtering by eventname: ", nrow(data), "\n")
+# Drop the `eventname` column
+#data <- dplyr::select(data, -eventname)
+```
+
+This takes quite a while — we will work with a subset of the data in the rest of this notebook.
+
+# Variable exploration
+
+## TV watching variable exploration
+
+Two variables seem similar: `screentime_wkdy_1` and `screentime_wkdy_typical_hr`.
+```{r}
+data_filtered <- dplyr::select(data2, src_subject_id, screentime_wkdy_1, screentime_wkdy_typical_hr)
+
+data_filtered <- data_filtered[!(is.na(data_filtered$screentime_wkdy_1) & is.na(data_filtered$screentime_wkdy_typical_hr)), ]
+# Print the number of rows removed
+cat("Number of rows after removal where both columns are NA:", nrow(data_filtered), "\n")
+
+# Check how many rows remain with NA in either column
+na_screentime_1 <- is.na(data_filtered$screentime_wkdy_1)
+na_screentime_typical <- is.na(data_filtered$screentime_wkdy_typical_hr)
+
+na_overlap <- sum(na_screentime_1 & na_screentime_typical)
+na_in_one <- sum(na_screentime_1 | na_screentime_typical)
+
+# Number of NAs in each column individually
+na_screentime_1_count <- sum(na_screentime_1)
+na_screentime_typical_count <- sum(na_screentime_typical)
+
+cat("Number of NAs in screentime_wkdy_1:", na_screentime_1_count, "\n")
+cat("Number of NAs in screentime_wkdy_typical_hr:", na_screentime_typical_count, "\n")
+
+# Print remaining NA analysis
+cat("Number of rows where both columns are NA (after cleaning):", na_overlap, "\n")
+cat("Number of rows where at least one column is NA (after cleaning):", na_in_one, "\n")
+```
+
+It seems we only need the first one, `screentime_wkdy_1`. We will add the equivalent for the weekend screen time, `screentime_wknd_7`.
+For reading, we use `sports_activity_ss_read_hours_p`.
+
+## Get subset of data and summarize variables
+
+```{r}
+column_names <- names(data)
+search_columns <- function(search_string, column_names) {
+    # Perform regex search
+    matching_columns <- grep(search_string, column_names, value = TRUE)
+    return(matching_columns)
+}
+demographic_variables <- c("interview_age", "sex", "abcd_site", "mri_info_device.serial.number", 
+                  "married.bl", "household.income.bl", "high.educ.bl", "hisp", "rel_family_id")
+phenotype_variables <- c("sports_activity_ss_read_hours_p",
+                         "cbcl_scr_dsm5_adhd_t",
+                         "screentime_wkdy_1",
+                         "screentime_wknd_7"
+                         )
+nih_scores <- search_columns("nihtbx.*uncorrected", names(data))
+quality_control_variables <- c("mrif_score", "fsqc_qc")
+imaging_tabulated_variables <- search_columns("smri_(thick|area).*desikan", column_names)
+cat("Number of imaging variables found: ", length(imaging_tabulated_variables), "\n")
+
+# Select relevant columns with the above lists
+data_subset <- dplyr::select(data,
+                             src_subject_id, eventname,
+                             all_of(demographic_variables),
+                             all_of(phenotype_variables),
+                             all_of(nih_scores),
+                             all_of(quality_control_variables),
+                             all_of(imaging_tabulated_variables))
+cat("\nMatrix size after column selection: ", dim(data_subset), "\n")
+
+# Merge data_subset with genomic_data on src_subject_id
+data_subset <- dplyr::left_join(data_subset, genomic_data, by = c("src_subject_id" = "IID"))
+data_subset <- dplyr::select(data_subset, -FID)
+cat("Matrix size after merging with genomic data: ", dim(data_subset), "\n")
+
+data_subset <- dplyr::filter(data_subset, fsqc_qc == "accept")
+cat("Number of lines after filtering by fsqc_qc: ", nrow(data_subset), "\n") 
+data_subset <- dplyr::filter(data_subset, mrif_score == "No abnormal findings" | mrif_score == "Normal anatomical variant of no clinical significance")
+cat("Number of lines after filtering by mrif_score: ", nrow(data_subset), "\n")
+
+# Filter NAs in all variables in "phenotype_variables"
+for (variable in phenotype_variables) {
+    if (grepl("cbcl", variable)) {
+        next
+    }
+    data_subset <- dplyr::filter(data_subset, !is.na(data_subset[[variable]]))
+    cat("Number of lines after filtering NAs in", variable, ":", nrow(data_subset), "\n")
+}
+
+# Filter missing reading data
+data_subset <- dplyr::filter(data_subset, !is.na(sports_activity_ss_read_hours_p))
+cat("Number of lines after filtering missing reading data: ", nrow(data_subset), "\n")
+
+# Filter cases where reading is above 56 hours
+data_subset <- dplyr::filter(data_subset, sports_activity_ss_read_hours_p <= 56)
+cat("Number of lines after filtering by reading values above 56: ", nrow(data_subset), "\n")
+
+# Filter missing imaging data
+for (variable in imaging_tabulated_variables) {
+    data_subset <- dplyr::filter(data_subset, !is.na(data_subset[[variable]]))
+}
+cat("Number of lines after filtering NAs in tabulated imaging data:", nrow(data_subset), "\n")
+
+# Filter missing demographic data
+for (variable in demographic_variables) {
+    data_subset <- dplyr::filter(data_subset, !is.na(data_subset[[variable]]))
+    cat("Number of lines after filtering NAs in", variable, ":", nrow(data_subset), "\n")
+}
+
+# Filter missing genomic data
+data_subset <- dplyr::filter(data_subset, !is.na(PC1))
+cat("Number of lines after filtering NAs in genomic data: ", nrow(data_subset), "\n")
+
+# # Filter missing NIH scores (only done for Figure 1)
+# for (variable in c("nihtbx_fluidcomp_uncorrected", "nihtbx_cryst_uncorrected", "nihtbx_totalcomp_uncorrected")) {
+#     data_subset <- dplyr::filter(data_subset, !is.na(data_subset[[variable]]))
+#     cat("Number of lines after filtering NAs in", variable, ":", nrow(data_subset), "\n")
+# }
+
+# “So it's 11,875 total > 11,810 (missing imaging data) > 10738 (imaging QC) > 10017 (missing behavioral data) > 9,968 (outlier filtering)”
+#“I can confirm that imaging QC, outlier filtering, and missing behavioral data yields 9,968 subjects but after running DEAPext the final analysis consists of 8,125”
+#“Thanks to Pierre's efforts we figured out that the drop from the 9000s to 8000s post-analysis is surprisingly from missing demographic data (most prominently household income and hispanic ethnicity but others as well). My pre-filtering steps only filtered for missing behavioral data which is why there was a discrepancy that only was revealed post-analysis.”
+
+
+# Create screentime variable
+# the screetime_kday/wdnd are levels: [ "None"       "15 minutes" "30 minutes" "1 hour"     "2 hours"    "3 hours"    "4+ hours"  ] --> convert to pseudo continuous!
+# Convert screentime levels to numeric values
+screentime_levels <- c("None" = 0, "15 minutes" = 0.25, "30 minutes" = 0.5, "1 hour" = 1, "2 hours" = 2, "3 hours" = 3, "4+ hours" = 4)
+data_subset$screentime_wkdy_1_num <- as.numeric(screentime_levels[data_subset$screentime_wkdy_1])
+data_subset$screentime_wknd_7_num <- as.numeric(screentime_levels[data_subset$screentime_wknd_7])
+data_subset$screentime <- (data_subset$screentime_wkdy_1_num * 5 + data_subset$screentime_wknd_7_num * 2) / 7
+
+# Create the daily reading time variable
+data_subset$readtime <- data_subset$sports_activity_ss_read_hours_p / 7
+```
+```{r}
+# Summarize each variable
+for (variable in colnames(data_subset)) {
+    if (variable != "src_subject_id") {
+        cat("\nSummary for variable: ", variable, "\n")
+        print(summary(data_subset[[variable]]))
+    }
+}
+```
+
+# Visualize the data
+
+## Individual variables
+```{r}
+data_filtered <- data_subset
+# Summary statistics for sports_activity_ss_read_hours_p
+cat("Summary statistics for sports_activity_ss_read_hours_p: \n")
+summary(data_filtered$sports_activity_ss_read_hours_p)
+
+# Summary statistics for screentime variables
+cat("Summary statistics for screentime_wkdy_1: \n")
+summary(data_filtered$screentime_wkdy_1)
+cat("Summary statistics for screentime_wknd_7: \n")
+summary(data_filtered$screentime_wknd_7)
+
+
+## Visualize the distribution of sports_activity_ss_read_hours_p with log scale on y-axis
+
+# Calculate the number of cases in each category
+zero_to_eight <- sum(data$sports_activity_ss_read_hours_p / 7 <= 8, na.rm = TRUE)
+eight_to_fourteen <- sum(data$sports_activity_ss_read_hours_p / 7 > 8 & data$sports_activity_ss_read_hours_p / 7 <= 14, na.rm = TRUE)
+four_to_eight <- sum(data$sports_activity_ss_read_hours_p / 7 > 4 & data$sports_activity_ss_read_hours_p / 7 <= 8, na.rm = TRUE)
+more_than_fourteen <- sum(data$sports_activity_ss_read_hours_p / 7 > 14, na.rm = TRUE)
+cat("Number of cases with 0-8 hours per day:", zero_to_eight, "\n")
+cat("Number of cases with 4-8 hours per day:", four_to_eight, "\n")
+cat("Number of cases with 8-14 hours per day:", eight_to_fourteen, "\n")
+cat("Number of cases with more than 14 hours per day:", more_than_fourteen, "\n")
+
+# Add text annotations to the plot
+ggplot(data, aes(x = sports_activity_ss_read_hours_p / 7)) +
+    geom_histogram(binwidth = 0.5, fill = "lightblue", color = "black") +
+    scale_y_log10() +
+    labs(title = "Distribution of Reading Hours per Day (before any filtering, including QC and NAs)", 
+            x = "Reading Hours per Day", 
+            y = "Count") +
+    theme_minimal() +
+    geom_vline(xintercept = c(8, 14), color = "black", linetype = "dashed", size = 1) +
+    annotate("text", x = 4, y = 1200, label = paste("0-8 hours:", zero_to_eight), color = "darkgray") +
+    annotate("text", x = 11, y = 1200, label = paste("8-14 hours:", eight_to_fourteen), color = "darkgray") +
+    annotate("text", x = 18, y = 1200, label = paste(">14 hours:", more_than_fourteen), color = "darkgray")
+# Combine the screentime data for weekday and weekend
+# Change specific values in screentime columns
+levels(data_filtered$screentime_wkdy_1)[levels(data_filtered$screentime_wkdy_1) == "0.25"] <- "15 minutes"
+levels(data_filtered$screentime_wknd_7)[levels(data_filtered$screentime_wknd_7) == "< 30 minutes"] <- "15 minutes"
+
+# Combine the screentime data for weekday and weekend
+data_long <- tidyr::pivot_longer(data_filtered, cols = c(screentime_wkdy_1, screentime_wknd_7), 
+                                 names_to = "day_type", values_to = "screentime_hours")
+
+# Create a combined bar plot
+ggplot(data_long, aes(x = factor(screentime_hours), fill = day_type)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Distribution of Screentime on Weekdays and Weekends", 
+       x = "Screentime (hours)", 
+       y = "Count") +
+  scale_fill_manual(values = c("lightgreen", "lightcoral"), 
+                    labels = c("Weekday", "Weekend")) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+# Filter cases where readtime is above 8 hours per day
+data_filtered <- dplyr::filter(data_filtered, readtime <= 8)
+cat("Number of lines after filtering by readtime: ", nrow(data_filtered), "\n")
+```
+
+## Relationships
+```{r}
+# Function to compute R-squared and p-value
+compute_regression_stats <- function(model) {
+    r_squared <- summary(model)$r.squared
+    p_value <- summary(model)$coefficients[2, 4]
+    return(list(r_squared = r_squared, p_value = p_value))
+}
+```
+
+### Explore the relationship between reading hours and ADHD scores (from the ADHD CBCL DSM5 Scale (t-score))
+
+```{r}
+# `cbcl_scr_dsm5_adhd_t` vs `sports_activity_ss_read_hours_p`
+model <- lm(cbcl_scr_dsm5_adhd_t ~ readtime, data = data_filtered)
+res = compute_regression_stats(model)
+annotation <- paste("R^2: ", round(res$r_squared, 2), "\np-value: ", format.pval(res$p_value, digits = 2))
+cat("Coefficients:\n")
+print(summary(model)$coefficients)
+
+# Plot
+ggplot(data_filtered, aes(x = sports_activity_ss_read_hours_p, y = cbcl_scr_dsm5_adhd_t)) +
+    geom_point(color = "blue", alpha = 0.5, position = position_jitter(width = 1, height = 1)) +
+    labs(title = "Scatter plot of ADHD Scores vs Reading Hours (Filtered)",
+         x = "Reading Hours per Week",
+         y = "ADHD Scores") +
+    theme_minimal() +
+    geom_smooth(method = "lm", color = "red", se = FALSE) +
+    annotate("text", x = 35, 
+             y = 56, 
+             label = annotation, 
+             color = "black")
+
+
+# `cbcl_scr_dsm5_adhd_t` vs `screentime`
+model <- lm(cbcl_scr_dsm5_adhd_t ~ screentime, data = data_filtered)
+res = compute_regression_stats(model)
+annotation <- paste("R^2: ", round(res$r_squared, 2), "\np-value: ", format.pval(res$p_value, digits = 2))
+cat("Coefficients:\n")
+print(summary(model)$coefficients)
+
+# Plot
+ggplot(data_filtered, aes(x = screentime, y = cbcl_scr_dsm5_adhd_t)) +
+    geom_point(color = "blue", alpha = 0.5, position = position_jitter(width = 0.08, height = 1)) +
+    labs(title = "Scatter plot of ADHD Scores vs Screentime Hours (Filtered)",
+         x = "Screentime Hours per Week",
+         y = "ADHD Scores") +
+    theme_minimal() +
+    geom_smooth(method = "lm", color = "red", se = FALSE) +
+    annotate("text", x = 3, 
+            y = 57, 
+            label = annotation, 
+            color = "black")
+```
+
+## Explore the NIH Toolbox Composite Scores
+```{r}
+# Summary statistics for NIH Toolbox Scores
+cat("Summary statistics for nihtbx_cryst_uncorrected: \n")
+summary(data_filtered$nihtbx_cryst_uncorrected)
+
+cat("Summary statistics for nihtbx_fluidcomp_uncorrected: \n")
+summary(data_filtered$nihtbx_fluidcomp_uncorrected)
+
+cat("Summary statistics for nihtbx_totalcomp_uncorrected: \n")
+summary(data_filtered$nihtbx_totalcomp_uncorrected)
+
+# Add a new column to categorize readtime as <4 hours or >=4 hours
+data_filtered$readtime_category <- ifelse(data_filtered$readtime < 4, "<4 hours", ">=4 hours")
+
+## Compute R-squared and p-values for all 6 regressions
+# List to store results
+regression_results <- list()
+
+# Regression 1: nihtbx_cryst_uncorrected vs readtime for readtimes < 4 hours
+model1 <- lm(nihtbx_cryst_uncorrected ~ readtime, data = dplyr::filter(data_filtered, readtime < 4))
+regression_results[["Crystallized Cognition vs Reading Time (<4 hours)"]] <- compute_regression_stats(model1)
+
+# Regression 2: nihtbx_cryst_uncorrected vs readtime for readtimes >= 4 hours
+model2 <- lm(nihtbx_cryst_uncorrected ~ readtime, data = dplyr::filter(data_filtered, readtime >= 4))
+regression_results[["Crystallized Cognition vs Reading Time (>=4 hours)"]] <- compute_regression_stats(model2)
+
+# Regression 3: nihtbx_fluidcomp_uncorrected vs readtime for readtimes < 4 hours
+model3 <- lm(nihtbx_fluidcomp_uncorrected ~ readtime, data = dplyr::filter(data_filtered, readtime < 4))
+regression_results[["Fluid Cognition vs Reading Time (<4 hours)"]] <- compute_regression_stats(model3)
+
+# Regression 4: nihtbx_fluidcomp_uncorrected vs readtime for readtimes >= 4 hours
+model4 <- lm(nihtbx_fluidcomp_uncorrected ~ readtime, data = dplyr::filter(data_filtered, readtime >= 4))
+regression_results[["Fluid Cognition vs Reading Time (>=4 hours)"]] <- compute_regression_stats(model4)
+
+# Regression 5: nihtbx_totalcomp_uncorrected vs readtime for readtimes < 4 hours
+model5 <- lm(nihtbx_totalcomp_uncorrected ~ readtime, data = dplyr::filter(data_filtered, readtime < 4))
+regression_results[["Total Cognition vs Reading Time (<4 hours)"]] <- compute_regression_stats(model5)
+
+# Regression 6: nihtbx_totalcomp_uncorrected vs readtime for readtimes >= 4 hours
+model6 <- lm(nihtbx_totalcomp_uncorrected ~ readtime, data = dplyr::filter(data_filtered, readtime >= 4))
+regression_results[["Total Cognition vs Reading Time (>=4 hours)"]] <- compute_regression_stats(model6)
+
+# Print results
+for (regression in names(regression_results)) {
+    cat(regression, "\n")
+    cat("R-squared: ", regression_results[[regression]]$r_squared, "\n")
+    cat("p-value: ", regression_results[[regression]]$p_value, "\n\n")
+}
+
+## Combine the three scatter plots into one plot with facets
+# Prepare data for faceting
+data_filtered_long <- data_filtered %>%
+    tidyr::pivot_longer(cols = c(nihtbx_cryst_uncorrected, nihtbx_fluidcomp_uncorrected, nihtbx_totalcomp_uncorrected),
+                        names_to = "variable", values_to = "score")
+
+# Add regression results to the data for annotation
+data_filtered_long <- data_filtered_long %>%
+    dplyr::mutate(
+        regression_label = dplyr::case_when(
+            variable == "nihtbx_cryst_uncorrected" & readtime_category == "<4 hours" ~ paste("R^2: ", round(regression_results[["Crystallized Cognition vs Reading Time (<4 hours)"]]$r_squared, 3), "\np-value: ", format.pval(regression_results[["Crystallized Cognition vs Reading Time (<4 hours)"]]$p_value, digits = 2)),
+            variable == "nihtbx_cryst_uncorrected" & readtime_category == ">=4 hours" ~ paste("R^2: ", round(regression_results[["Crystallized Cognition vs Reading Time (>=4 hours)"]]$r_squared, 3), "\np-value: ", format.pval(regression_results[["Crystallized Cognition vs Reading Time (>=4 hours)"]]$p_value, digits = 2)),
+            variable == "nihtbx_fluidcomp_uncorrected" & readtime_category == "<4 hours" ~ paste("R^2: ", round(regression_results[["Fluid Cognition vs Reading Time (<4 hours)"]]$r_squared, 3), "\np-value: ", format.pval(regression_results[["Fluid Cognition vs Reading Time (<4 hours)"]]$p_value, digits = 2)),
+            variable == "nihtbx_fluidcomp_uncorrected" & readtime_category == ">=4 hours" ~ paste("R^2: ", round(regression_results[["Fluid Cognition vs Reading Time (>=4 hours)"]]$r_squared, 3), "\np-value: ", format.pval(regression_results[["Fluid Cognition vs Reading Time (>=4 hours)"]]$p_value, digits = 2)),
+            variable == "nihtbx_totalcomp_uncorrected" & readtime_category == "<4 hours" ~ paste("R^2: ", round(regression_results[["Total Cognition vs Reading Time (<4 hours)"]]$r_squared, 3), "\np-value: ", format.pval(regression_results[["Total Cognition vs Reading Time (<4 hours)"]]$p_value, digits = 2)),
+            variable == "nihtbx_totalcomp_uncorrected" & readtime_category == ">=4 hours" ~ paste("R^2: ", round(regression_results[["Total Cognition vs Reading Time (>=4 hours)"]]$r_squared, 3), "\np-value: ", format.pval(regression_results[["Total Cognition vs Reading Time (>=4 hours)"]]$p_value, digits = 2))
+        )
+    )
+
+# Plot with facets
+combined_plot <- ggplot(data_filtered_long, aes(x = readtime, y = score)) +
+    # Points with fill aesthetic
+    geom_point(alpha = 0.2, position = position_jitter(width = 0.05, height = 1), 
+               aes(fill = readtime_category), shape = 21, size = 2, stroke = 0) + 
+    
+    # Fit lines with color aesthetic
+    geom_smooth(method = "lm", se = TRUE, size = 2, linetype = "solid",
+                aes(color = readtime_category)) +
+    
+    # Separate scales for points (fill) and lines (color)
+    scale_fill_manual(
+        values = c("<4 hours" = "steelblue", ">=4 hours" = "darkseagreen") # Points' fill colors
+    ) +
+    scale_color_manual(
+        values = c("<4 hours" = "darkblue", ">=4 hours" = "darkgreen")     # Lines' colors
+    ) +
+    
+    # Labels
+    labs(
+        # title = "Scatter plots of NIH Toolbox un-corrected Cognition Scores vs Reading Hours",
+        plot.title = element_text(hjust = 0.5),
+        x = "Reading Hours per Day",
+        y = "Raw Score",
+    ) +
+    
+    # Facets
+    facet_wrap(~ variable, scales = "free_x", ncol = 3, 
+               labeller = as_labeller(c(
+                   nihtbx_cryst_uncorrected = "Crystallized", 
+                   nihtbx_fluidcomp_uncorrected = "Fluid", 
+                   nihtbx_totalcomp_uncorrected = "Total"
+               ))) +
+    
+    # Y-axis limits
+    ylim(45, 130) +
+    
+    # Theme adjustments
+    theme_minimal() +
+    theme(
+        legend.position = "none",
+        aspect.ratio = 0.5,
+        plot.title = element_text(size = 20),
+        axis.title.x = element_text(size = 16),
+        axis.title.y = element_text(size = 16),
+        axis.text = element_text(size = 14),
+        strip.text = element_text(size = 18)
+    ) +
+    
+    # Add regression results as text annotations
+    geom_text(data = data_filtered_long %>% dplyr::filter(readtime_category == "<4 hours"), 
+              aes(x = 2, y = 50, label = regression_label), 
+              color = "black", size = 3, parse = FALSE) +
+    geom_text(data = data_filtered_long %>% dplyr::filter(readtime_category == ">=4 hours"), 
+              aes(x = 6, y = 50, label = regression_label), 
+              color = "black", size = 3, parse = FALSE)
+
+print(combined_plot)
+# Save the combined plot to the figures directory
+output_file <- file.path(figures_dir, "combined_uncorrected_cognition_scores_vs_reading_hours2.png")
+ggsave(output_file, plot = combined_plot, width = 20, height = 6, bg = "white")
+cat("Combined plot saved to:", output_file, "\n")
+
+```
+
+```{r}
+# Scatter plot: `nihtbx_totalcomp_uncorrected` vs `readtime`
+ggplot(data_filtered, aes(x = cbcl_scr_dsm5_adhd_t, y = nihtbx_totalcomp_uncorrected)) +
+    geom_point(alpha = 0.5, position = position_jitter(width = 0.05, height = 0.4)) +
+    labs(title = "Scatter plot of Total Cognition Scores vs ADHD t-scores",
+         x = "ADHD t-scores",
+         y = "Total Cognition Scores") +
+    theme_minimal() +
+    geom_smooth(method = "lm", se = TRUE)
+
+```
+
+# Export design matrix for FEMA analysis
+Here, we need to export the matrix in a specific format, with `src_subject_id`, `eventname`, `rel_family_id`, `age`, other predictor variables. We will use the `data_subset` dataframe for this purpose.
+We also need to dummy encode the categorical variables, check for rank deficiency, remove the redundant columns, add the intercept column, and save the matrix to a *tab*-separated file.
+```{r}
+#install.packages("psych")
+#install.packages("ordinal")
+#install.packages("pracma")
+source("../../code/matlab/cmig_tools/cmig_tools_utils/r/makeDesign.R")
+
+vars_of_interest = c("readtime", "screentime", "cbcl_scr_dsm5_adhd_t")
+
+outfile <- "../../data/derived/design_matrices/design_matrix_readtime+screentime+adhd.txt"
+time <- c("baseline_year_1_arm_1")
+contvar <- c("interview_age", vars_of_interest, paste0("PC", 1:10))
+catvar <- c("sex", "abcd_site", "married.bl", "household.income.bl", "high.educ.bl", "hisp", "mri_info_device.serial.number")
+demean <- FALSE
+
+# check that all variables are in data_subset
+for (var in c(contvar, catvar)) {
+  if (!var %in% colnames(data_subset)) {
+    stop(paste("Variable", var, "not found in data_subset"))
+  }
+}
+
+# Call the makeDesign function
+design_matrix <- makeDesign(
+  nda = data_subset,
+  outfile = outfile,
+  time = time,
+  contvar = contvar,
+  catvar = catvar,
+  demean = demean
+)
+
+```

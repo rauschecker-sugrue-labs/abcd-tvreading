@@ -1,0 +1,10 @@
+.env/
+*.code-workspace
+code/matlab/cmig_tools/
+data/abcd-sync/
+data/design_matrices/
+**.mat
+**.Rds
+plink2.eigenvec
+**.csv
+**.txt
